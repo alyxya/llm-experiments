@@ -1,0 +1,22 @@
+{
+  "alphabet": "abcdefghij",
+  "min_seq_len": 3,
+  "max_seq_len": 20,
+  "context_len": 128,
+  "n_layers": 3,
+  "n_heads": 4,
+  "embed_dim": 128,
+  "dropout": 0.0,
+  "train": {
+    "lr": 0.0003,
+    "min_lr": 1e-05,
+    "max_steps": 10,
+    "batch_size": 64,
+    "eval_interval": 5,
+    "log_interval": 5,
+    "checkpoint_interval": 10,
+    "warmup_steps": 100,
+    "max_grad_norm": 1.0,
+    "device": "auto"
+  }
+}
