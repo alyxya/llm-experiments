@@ -25,6 +25,13 @@ class CausalSelfAttention(nn.Module):
         self.qkv = nn.Linear(cfg.embed_dim, 3 * cfg.embed_dim, bias=False)
         self.out = nn.Linear(cfg.embed_dim, cfg.embed_dim, bias=False)
         self.dropout = cfg.dropout
+        # After LN scaling and contraction-dim init, per-head q/k/v norms are ~1/sqrt(H).
+        # Multiply by sqrt(H) so each head vector has norm ~1.
+        self.head_norm_scale = math.sqrt(cfg.n_heads)
+        # With q,k head vectors at norm ~1 (component var ~1/d_k), q·k has var ~1/d_k.
+        # Multiply logits by sqrt(d_k) so softmax logits have O(1) std.
+        self.logit_gain = 1.0
+        self.logit_scale = self.logit_gain * math.sqrt(self.head_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, T, C = x.shape
@@ -33,8 +40,14 @@ class CausalSelfAttention(nn.Module):
         q = q.transpose(1, 2)  # (B, n_heads, T, head_dim)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
+        q = q * self.head_norm_scale
+        k = k * self.head_norm_scale
+        v = v * self.head_norm_scale
         x = F.scaled_dot_product_attention(
-            q, k, v, is_causal=True, dropout_p=self.dropout if self.training else 0.0
+            q, k, v,
+            is_causal=True,
+            dropout_p=self.dropout if self.training else 0.0,
+            scale=self.logit_scale,
         )
         x = x.transpose(1, 2).reshape(B, T, C)
         return self.out(x)
