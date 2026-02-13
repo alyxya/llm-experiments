@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 @dataclass
@@ -23,6 +24,7 @@ class TrainConfig:
     device: str = "auto"
     rotational_dot_products: bool = True
     optimizer: str = "adamw"  # "adamw" or "sgd"
+    loss: str = "cross_entropy"  # "cross_entropy" or "sse_onehot_logits"
 
 
 def get_device(device: str) -> str:
@@ -101,6 +103,21 @@ def _apply_rotational_dot_product_projection_(
             p.grad.copy_(_project_to_target_radius(p.grad, p.data, target_radius))
 
 
+def _compute_train_loss(logits: torch.Tensor, targets: torch.Tensor, train_cfg: TrainConfig) -> torch.Tensor:
+    if train_cfg.loss == "cross_entropy":
+        return F.cross_entropy(
+            logits.view(-1, logits.size(-1)),
+            targets.view(-1),
+            ignore_index=0,
+        )
+    if train_cfg.loss == "sse_onehot_logits":
+        one_hot = F.one_hot(targets, num_classes=logits.size(-1)).to(logits.dtype)
+        per_token_sse = (logits - one_hot).pow(2).sum(dim=-1)
+        mask = (targets != 0).to(logits.dtype)
+        return (per_token_sse * mask).sum()
+    raise ValueError(f"Unsupported loss: {train_cfg.loss}")
+
+
 def train(
     model: nn.Module,
     get_batch: Callable[[int, str], tuple[torch.Tensor, torch.Tensor]],
@@ -142,9 +159,7 @@ def train(
 
         x, y = get_batch(train_cfg.batch_size, device)
         logits = model(x)
-        loss = torch.nn.functional.cross_entropy(
-            logits.view(-1, logits.size(-1)), y.view(-1), ignore_index=0
-        )
+        loss = _compute_train_loss(logits, y, train_cfg)
 
         optimizer.zero_grad()
         loss.backward()

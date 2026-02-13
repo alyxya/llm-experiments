@@ -55,6 +55,8 @@ def make_get_batch(tok: Tokenizer, cfg: CopyingConfig):
 
 def evaluate(tok: Tokenizer, cfg: CopyingConfig, model: GPT, device: str, n_samples: int = 500) -> dict:
     correct = 0
+    token_correct = 0
+    token_total = 0
     for _ in range(n_samples):
         length = random.randint(cfg.min_seq_len, cfg.max_seq_len)
         chars = "".join(random.choice(cfg.alphabet) for _ in range(length))
@@ -71,10 +73,22 @@ def evaluate(tok: Tokenizer, cfg: CopyingConfig, model: GPT, device: str, n_samp
         if tok.EOS in generated:
             generated = generated[:generated.index(tok.EOS)]
 
+        # Token accuracy is computed on the target copy tokens only.
+        matched = sum(
+            1 for i in range(length)
+            if i < len(generated) and generated[i] == encoded[i]
+        )
+        token_correct += matched
+        token_total += length
+
         if generated == encoded:
             correct += 1
 
-    return {"accuracy": correct / n_samples, "n_samples": n_samples}
+    return {
+        "accuracy": correct / n_samples,
+        "token_accuracy": token_correct / max(token_total, 1),
+        "n_samples": n_samples,
+    }
 
 
 def interactive(tok: Tokenizer, cfg: CopyingConfig, model: GPT, device: str):
