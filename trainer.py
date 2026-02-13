@@ -24,7 +24,7 @@ class TrainConfig:
     device: str = "auto"
     rotational_dot_products: bool = True
     optimizer: str = "adamw"  # "adamw" or "sgd"
-    loss: str = "cross_entropy"  # "cross_entropy" or "sse_onehot_logits"
+    loss: str = "cross_entropy"  # "cross_entropy", "sse_onehot_logits", "sse_onehot_logits_valid_token_mean", or "sse_onehot_logits_valid_token_batch_mean"
 
 
 def get_device(device: str) -> str:
@@ -110,11 +110,21 @@ def _compute_train_loss(logits: torch.Tensor, targets: torch.Tensor, train_cfg: 
             targets.view(-1),
             ignore_index=0,
         )
-    if train_cfg.loss == "sse_onehot_logits":
+    if train_cfg.loss in {
+        "sse_onehot_logits",
+        "sse_onehot_logits_valid_token_mean",
+        "sse_onehot_logits_valid_token_batch_mean",
+    }:
         one_hot = F.one_hot(targets, num_classes=logits.size(-1)).to(logits.dtype)
         per_token_sse = (logits - one_hot).pow(2).sum(dim=-1)
         mask = (targets != 0).to(logits.dtype)
-        return (per_token_sse * mask).sum()
+        masked_sse_sum = (per_token_sse * mask).sum()
+        if train_cfg.loss == "sse_onehot_logits":
+            return masked_sse_sum
+        valid_tokens = mask.sum().clamp_min(1.0)
+        if train_cfg.loss == "sse_onehot_logits_valid_token_mean":
+            return masked_sse_sum / valid_tokens
+        return masked_sse_sum / (valid_tokens * targets.size(0))
     raise ValueError(f"Unsupported loss: {train_cfg.loss}")
 
 

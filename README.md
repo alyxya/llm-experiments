@@ -28,6 +28,8 @@ Takes ~30s on MPS, ~2-3 min on CPU. After training, drops into an interactive RE
 Training loss is configurable via `TrainConfig.loss`:
 - `cross_entropy` (default)
 - `sse_onehot_logits` (sum of squared error on logits vs one-hot targets, with PAD masked out)
+- `sse_onehot_logits_valid_token_mean` (same SSE, divided by non-PAD token count)
+- `sse_onehot_logits_valid_token_batch_mean` (same SSE, divided by non-PAD token count and batch size)
 
 ## Adding a New Experiment
 
