@@ -16,6 +16,16 @@ class ModelConfig:
     dropout: float = 0.0
 
 
+class RMSNorm(nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps) * self.weight
+
+
 class CausalSelfAttention(nn.Module):
     def __init__(self, cfg: ModelConfig):
         super().__init__()
@@ -55,14 +65,14 @@ class MLP(nn.Module):
 class Block(nn.Module):
     def __init__(self, cfg: ModelConfig):
         super().__init__()
-        self.ln1 = nn.LayerNorm(cfg.embed_dim)
+        self.norm1 = RMSNorm(cfg.embed_dim)
         self.attn = CausalSelfAttention(cfg)
-        self.ln2 = nn.LayerNorm(cfg.embed_dim)
+        self.norm2 = RMSNorm(cfg.embed_dim)
         self.mlp = MLP(cfg)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.attn(self.ln1(x))
-        x = x + self.mlp(self.ln2(x))
+        x = x + self.attn(self.norm1(x))
+        x = x + self.mlp(self.norm2(x))
         return x
 
 
@@ -73,7 +83,7 @@ class GPT(nn.Module):
         self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.embed_dim)
         self.pos_emb = nn.Embedding(cfg.context_len, cfg.embed_dim)
         self.blocks = nn.ModuleList([Block(cfg) for _ in range(cfg.n_layers)])
-        self.ln_f = nn.LayerNorm(cfg.embed_dim)
+        self.norm_f = RMSNorm(cfg.embed_dim)
         self.head = nn.Linear(cfg.embed_dim, cfg.vocab_size, bias=False)
 
         # weight tying
@@ -88,9 +98,8 @@ class GPT(nn.Module):
                 nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
-        elif isinstance(module, nn.LayerNorm):
+        elif isinstance(module, RMSNorm):
             nn.init.ones_(module.weight)
-            nn.init.zeros_(module.bias)
 
     def forward(self, idx: torch.Tensor) -> torch.Tensor:
         B, T = idx.shape
@@ -98,7 +107,7 @@ class GPT(nn.Module):
         x = self.tok_emb(idx) + self.pos_emb(pos)
         for block in self.blocks:
             x = block(x)
-        x = self.ln_f(x)
+        x = self.norm_f(x)
         return self.head(x)
 
     @torch.no_grad()
