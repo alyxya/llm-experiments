@@ -9,6 +9,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from optimizer import RotationalOptimizer
+
 
 @dataclass
 class TrainConfig:
@@ -22,9 +24,7 @@ class TrainConfig:
     warmup_steps: int = 100
     max_grad_norm: float = 1.0
     device: str = "auto"
-    rotational_dot_products: bool = True
-    optimizer: str = "adamw"  # "adamw" or "sgd"
-    loss: str = "cross_entropy"  # "cross_entropy", "sse_onehot_logits", "sse_onehot_logits_valid_token_mean", or "sse_onehot_logits_valid_token_batch_mean"
+    optimizer: str = "adamw"  # "adamw" or "rotational"
 
 
 def get_device(device: str) -> str:
@@ -44,88 +44,6 @@ def get_lr(step: int, cfg: TrainConfig) -> float:
         return cfg.min_lr
     progress = (step - cfg.warmup_steps) / (cfg.max_steps - cfg.warmup_steps)
     return cfg.min_lr + 0.5 * (cfg.lr - cfg.min_lr) * (1 + math.cos(math.pi * progress))
-
-
-def _collect_dot_product_target_radii(model: nn.Module) -> dict[int, float]:
-    """Initialization-based target radii for dot-product parameters.
-
-    For Gaussian init with per-element std sigma and contraction dim d, the expected
-    row norm is about sigma * sqrt(d). We estimate sigma from initialized weights.
-    """
-    target_radii: dict[int, float] = {}
-    for module in model.modules():
-        if isinstance(module, (nn.Linear, nn.Embedding)):
-            weight = getattr(module, "weight", None)
-            if weight is None or not weight.requires_grad:
-                continue
-            pid = id(weight)
-            if pid in target_radii:
-                continue
-            d = weight.shape[-1]
-            sigma = weight.data.float().std(unbiased=False).item()
-            if math.isfinite(sigma) and sigma > 0.0:
-                target_radii[pid] = sigma * math.sqrt(d)
-            else:
-                # Fallback if std is degenerate for any reason.
-                if weight.ndim > 1:
-                    target_radii[pid] = max(
-                        weight.data.float().norm(dim=-1).mean().item(), 1e-12
-                    )
-                else:
-                    target_radii[pid] = max(weight.data.float().norm().item(), 1e-12)
-    return target_radii
-
-
-def _project_to_target_radius(
-    grad: torch.Tensor,
-    x: torch.Tensor,
-    target_radius: float,
-) -> torch.Tensor:
-    """Project gradient to tangent space of sphere with radius target_radius.
-
-    Equivalent to scaling by target_radius, projecting on the unit sphere, and
-    scaling back. This matches initialization-dependent expected norms.
-    """
-    r2 = max(target_radius * target_radius, 1e-12)
-    return grad - (grad * x).sum(dim=-1, keepdim=True) * (x / r2)
-
-
-@torch.no_grad()
-def _apply_rotational_dot_product_projection_(
-    model: nn.Module,
-    dot_target_radii: dict[int, float],
-):
-    for p in model.parameters():
-        if p.grad is None:
-            continue
-        target_radius = dot_target_radii.get(id(p))
-        if target_radius is not None:
-            p.grad.copy_(_project_to_target_radius(p.grad, p.data, target_radius))
-
-
-def _compute_train_loss(logits: torch.Tensor, targets: torch.Tensor, train_cfg: TrainConfig) -> torch.Tensor:
-    if train_cfg.loss == "cross_entropy":
-        return F.cross_entropy(
-            logits.view(-1, logits.size(-1)),
-            targets.view(-1),
-            ignore_index=0,
-        )
-    if train_cfg.loss in {
-        "sse_onehot_logits",
-        "sse_onehot_logits_valid_token_mean",
-        "sse_onehot_logits_valid_token_batch_mean",
-    }:
-        one_hot = F.one_hot(targets, num_classes=logits.size(-1)).to(logits.dtype)
-        per_token_sse = (logits - one_hot).pow(2).sum(dim=-1)
-        mask = (targets != 0).to(logits.dtype)
-        masked_sse_sum = (per_token_sse * mask).sum()
-        if train_cfg.loss == "sse_onehot_logits":
-            return masked_sse_sum
-        valid_tokens = mask.sum().clamp_min(1.0)
-        if train_cfg.loss == "sse_onehot_logits_valid_token_mean":
-            return masked_sse_sum / valid_tokens
-        return masked_sse_sum / (valid_tokens * targets.size(0))
-    raise ValueError(f"Unsupported loss: {train_cfg.loss}")
 
 
 def train(
@@ -150,15 +68,11 @@ def train(
 
     if train_cfg.optimizer == "adamw":
         optimizer = torch.optim.AdamW(model.parameters(), lr=train_cfg.lr)
-    elif train_cfg.optimizer == "sgd":
-        optimizer = torch.optim.SGD(model.parameters(), lr=train_cfg.lr)
+    elif train_cfg.optimizer == "rotational":
+        optimizer = RotationalOptimizer(model.parameters(), lr=train_cfg.lr)
     else:
         raise ValueError(f"Unsupported optimizer: {train_cfg.optimizer}")
-    dot_target_radii = (
-        _collect_dot_product_target_radii(model)
-        if train_cfg.rotational_dot_products
-        else {}
-    )
+
     loss_log = []
 
     for step in range(train_cfg.max_steps):
@@ -169,12 +83,14 @@ def train(
 
         x, y = get_batch(train_cfg.batch_size, device)
         logits = model(x)
-        loss = _compute_train_loss(logits, y, train_cfg)
+        loss = F.cross_entropy(
+            logits.view(-1, logits.size(-1)),
+            y.view(-1),
+            ignore_index=0,
+        )
 
         optimizer.zero_grad()
         loss.backward()
-        if train_cfg.rotational_dot_products:
-            _apply_rotational_dot_product_projection_(model, dot_target_radii)
         torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.max_grad_norm)
         optimizer.step()
 

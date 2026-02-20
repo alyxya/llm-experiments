@@ -25,29 +25,18 @@ class CausalSelfAttention(nn.Module):
         self.qkv = nn.Linear(cfg.embed_dim, 3 * cfg.embed_dim, bias=False)
         self.out = nn.Linear(cfg.embed_dim, cfg.embed_dim, bias=False)
         self.dropout = cfg.dropout
-        # After LN scaling and contraction-dim init, per-head q/k/v norms are ~1/sqrt(H).
-        # Multiply by sqrt(H) so each head vector has norm ~1.
-        self.head_norm_scale = math.sqrt(cfg.n_heads)
-        # With q,k head vectors at norm ~1 (component var ~1/d_k), q·k has var ~1/d_k.
-        # Multiply logits by sqrt(d_k) so softmax logits have O(1) std.
-        self.logit_gain = 1.0
-        self.logit_scale = self.logit_gain * math.sqrt(self.head_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, T, C = x.shape
         qkv = self.qkv(x).reshape(B, T, 3, self.n_heads, self.head_dim)
-        q, k, v = qkv.unbind(dim=2)  # each: (B, T, n_heads, head_dim)
-        q = q.transpose(1, 2)  # (B, n_heads, T, head_dim)
+        q, k, v = qkv.unbind(dim=2)
+        q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
-        q = q * self.head_norm_scale
-        k = k * self.head_norm_scale
-        v = v * self.head_norm_scale
         x = F.scaled_dot_product_attention(
             q, k, v,
             is_causal=True,
             dropout_p=self.dropout if self.training else 0.0,
-            scale=self.logit_scale,
         )
         x = x.transpose(1, 2).reshape(B, T, C)
         return self.out(x)
@@ -58,32 +47,22 @@ class MLP(nn.Module):
         super().__init__()
         self.up = nn.Linear(cfg.embed_dim, 4 * cfg.embed_dim, bias=False)
         self.down = nn.Linear(4 * cfg.embed_dim, cfg.embed_dim, bias=False)
-        # Dimension-change normalization for variance-preserving maps:
-        # y = (x @ W^T) * sqrt(d_in / d_out)
-        self._up_out_scale = math.sqrt(self.up.in_features / self.up.out_features)
-        self._down_out_scale = math.sqrt(self.down.in_features / self.down.out_features)
-        # With unit-norm vectors in high dimensions, GELU is near-linear around 0:
-        # gelu(x) ~= 0.5x. Compensate to keep MLP branch scale near 1.
-        self._gelu_out_scale = 2.0
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h = self.up(x) * self._up_out_scale
-        h = F.gelu(h) * self._gelu_out_scale
-        return self.down(h) * self._down_out_scale
+        return self.down(F.gelu(self.up(x)))
 
 
 class Block(nn.Module):
     def __init__(self, cfg: ModelConfig):
         super().__init__()
-        self._ln_out_scale = 1.0 / math.sqrt(cfg.embed_dim)
         self.ln1 = nn.LayerNorm(cfg.embed_dim)
         self.attn = CausalSelfAttention(cfg)
         self.ln2 = nn.LayerNorm(cfg.embed_dim)
         self.mlp = MLP(cfg)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.attn(self.ln1(x) * self._ln_out_scale)
-        x = x + self.mlp(self.ln2(x) * self._ln_out_scale)
+        x = x + self.attn(self.ln1(x))
+        x = x + self.mlp(self.ln2(x))
         return x
 
 
@@ -94,7 +73,6 @@ class GPT(nn.Module):
         self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.embed_dim)
         self.pos_emb = nn.Embedding(cfg.context_len, cfg.embed_dim)
         self.blocks = nn.ModuleList([Block(cfg) for _ in range(cfg.n_layers)])
-        self._ln_out_scale = 1.0 / math.sqrt(cfg.embed_dim)
         self.ln_f = nn.LayerNorm(cfg.embed_dim)
         self.head = nn.Linear(cfg.embed_dim, cfg.vocab_size, bias=False)
 
@@ -105,15 +83,11 @@ class GPT(nn.Module):
 
     def _init_weights(self, module: nn.Module):
         if isinstance(module, nn.Linear):
-            # Contraction dim for y = x @ W^T is W.shape[-1].
-            d_contract = module.weight.shape[-1]
-            nn.init.normal_(module.weight, mean=0.0, std=1.0 / math.sqrt(d_contract))
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
-            # Embedding rows are vectors in R^embed_dim.
-            d_vector = module.weight.shape[-1]
-            nn.init.normal_(module.weight, mean=0.0, std=1.0 / math.sqrt(d_vector))
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
         elif isinstance(module, nn.LayerNorm):
             nn.init.ones_(module.weight)
             nn.init.zeros_(module.bias)
@@ -124,7 +98,7 @@ class GPT(nn.Module):
         x = self.tok_emb(idx) + self.pos_emb(pos)
         for block in self.blocks:
             x = block(x)
-        x = self.ln_f(x) * self._ln_out_scale
+        x = self.ln_f(x)
         return self.head(x)
 
     @torch.no_grad()
