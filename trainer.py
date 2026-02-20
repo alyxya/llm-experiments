@@ -22,6 +22,7 @@ class TrainConfig:
     max_grad_norm: float = 1.0
     device: str = "auto"
     optimizer: str = "adamw"  # "adamw" or "rotational"
+    rotational_mode: str = "row"  # "row", "col", "frobenius", "rowcol", "rowcol_drift"
 
 
 def get_device(device: str) -> str:
@@ -57,7 +58,7 @@ def train(
     if train_cfg.optimizer == "adamw":
         optimizer = torch.optim.AdamW(model.parameters(), lr=train_cfg.lr)
     elif train_cfg.optimizer == "rotational":
-        optimizer = RotationalOptimizer(model.parameters(), lr=train_cfg.lr)
+        optimizer = RotationalOptimizer(model.parameters(), lr=train_cfg.lr, mode=train_cfg.rotational_mode)
     else:
         raise ValueError(f"Unsupported optimizer: {train_cfg.optimizer}")
 
