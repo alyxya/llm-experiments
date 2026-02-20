@@ -3,12 +3,13 @@ from torch.optim import Optimizer
 
 
 class RotationalOptimizer(Optimizer):
-    """Rotational optimizer using Frobenius-norm-preserving updates.
+    """Rotational optimizer using per-row norm-preserving updates.
 
-    For each parameter:
-      1. Scale gradient to match the Frobenius norm of the weights
-      2. Update: W_new = W - lr * (g_scaled - W)
-      3. Re-normalize W_new to preserve the original Frobenius norm
+    For each 2D weight matrix, rows are the dot-product vectors
+    (y = x @ W^T dots each row of W with x). The update per row:
+      1. Scale gradient row to match the weight row's norm
+      2. w += lr * (-g_scaled - w)
+      3. Re-normalize to preserve the original row norm
 
     1D parameters (e.g. LayerNorm) are updated with plain SGD.
     """
@@ -36,17 +37,18 @@ class RotationalOptimizer(Optimizer):
                     p.add_(p.grad, alpha=-lr)
                     continue
 
-                w_norm = p.data.norm()
-                g_norm = p.grad.norm().clamp(min=1e-12)
+                # Row norms (contraction dim is always dim=-1)
+                w_norm = p.data.norm(dim=-1, keepdim=True)
+                g_norm = p.grad.norm(dim=-1, keepdim=True).clamp(min=1e-12)
 
-                # Scale gradient to match weight's Frobenius norm
+                # Scale each gradient row to match its weight row's norm
                 g_scaled = p.grad * (w_norm / g_norm)
 
-                # Update: move away from gradient direction
-                p.data.sub_(g_scaled - p.data, alpha=lr)
+                # w += lr * (-g_scaled - w)
+                p.data.add_(-g_scaled - p.data, alpha=lr)
 
-                # Re-normalize to preserve original Frobenius norm
-                new_norm = p.data.norm().clamp(min=1e-12)
+                # Re-normalize each row to preserve original norm
+                new_norm = p.data.norm(dim=-1, keepdim=True).clamp(min=1e-12)
                 p.data.mul_(w_norm / new_norm)
 
         return loss
