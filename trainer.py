@@ -1,5 +1,4 @@
 import json
-import math
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -14,14 +13,12 @@ from optimizer import RotationalOptimizer
 
 @dataclass
 class TrainConfig:
-    lr: float = 3e-4
-    min_lr: float = 1e-5
+    lr: float = 1e-3
     max_steps: int = 5000
     batch_size: int = 64
     eval_interval: int = 500
     log_interval: int = 100
     checkpoint_interval: int = 1000
-    warmup_steps: int = 100
     max_grad_norm: float = 1.0
     device: str = "auto"
     optimizer: str = "adamw"  # "adamw" or "rotational"
@@ -35,15 +32,6 @@ def get_device(device: str) -> str:
     if torch.cuda.is_available():
         return "cuda"
     return "cpu"
-
-
-def get_lr(step: int, cfg: TrainConfig) -> float:
-    if step < cfg.warmup_steps:
-        return cfg.lr * (step + 1) / cfg.warmup_steps
-    if step >= cfg.max_steps:
-        return cfg.min_lr
-    progress = (step - cfg.warmup_steps) / (cfg.max_steps - cfg.warmup_steps)
-    return cfg.min_lr + 0.5 * (cfg.lr - cfg.min_lr) * (1 + math.cos(math.pi * progress))
 
 
 def train(
@@ -77,9 +65,7 @@ def train(
 
     for step in range(train_cfg.max_steps):
         model.train()
-        lr = get_lr(step, train_cfg)
-        for pg in optimizer.param_groups:
-            pg["lr"] = lr
+        lr = train_cfg.lr
 
         x, y = get_batch(train_cfg.batch_size, device)
         logits = model(x)
